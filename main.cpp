@@ -13,8 +13,12 @@
 #include <fstream>
 #include <algorithm>
 #include <unordered_map>
+#include <random>
+#include <ctime>
 
 #define COMP 3
+
+static std::mt19937 rand_n(time(nullptr));
 
 using ColorChannel = unsigned char;
 
@@ -83,16 +87,22 @@ namespace std {
 
 class Image
 {
-
     struct Vec2{
         int x, y;
     };
 
-    int width_ {0};
-    int height_ {0};
-    int stride_ {0};
+    struct ColorFilter{
+        Pixel filter {};
+        double strength {};
+    };
+
+    int width_ {};
+    int height_ {};
+    int stride_ {};
     std::vector<Pixel> data_;
     Vec2 orientation {0, 1};
+
+    ColorFilter color_filter_ {};
 
     bool isOneColor_ = false;
     Pixel color_{};
@@ -110,6 +120,10 @@ public:
     }
     
     Image(Pixel color): color_(color), isOneColor_(true) {}
+
+    void set_color_filter(ColorFilter color_filter){
+        color_filter_ = color_filter;
+    }
 
     Pixel read_pixel(int x, int y) const {
         if(isOneColor_) { return color_; }
@@ -134,7 +148,14 @@ public:
         if(x >= width_ || y >= height_){
             throw std::out_of_range("read_pixel: coordinates out of bounds");
         }
-        return data_[x + y * width_];
+        
+        Pixel target_pixel = data_[x + y * width_];
+
+        target_pixel.r = target_pixel.r + (color_filter_.filter.r - target_pixel.r) * color_filter_.strength;
+        target_pixel.g = target_pixel.g + (color_filter_.filter.g - target_pixel.g) * color_filter_.strength;
+        target_pixel.b = target_pixel.b + (color_filter_.filter.b - target_pixel.b) * color_filter_.strength;
+        
+        return target_pixel;
     }
 
     void rotate_90_degrees(int times = 1){
@@ -338,7 +359,7 @@ class ImageCatalog{
     int max_checks_{3}; // max amount of images checked in a block to find best
 
     void write_to_appropriate_block(FileColor fc){
-        auto& block = get_block(fc.avgColor);
+        auto& block = get_appropriate_block(fc.avgColor);
         if (std::find(block.begin(),block.end(),fc) == block.end()){
             block.push_back(fc);
             images_ctr_++;
@@ -421,12 +442,50 @@ class ImageCatalog{
         return dr * dr + dg * dg + db * db;
     }
 
-    Image getClosestImage(const Pixel& target_pixel) const {
-        const auto& block = get_block(target_pixel);
+    std::vector<FileColor> get_expanded_block(const Pixel& target_pixel) const {
+        std::vector<FileColor> res {};
+
+        for (int i = -1; i <= 1; i++){
+            for (int j = -1; j <= 1; j++){
+                for (int k = -1; k <= 1; k++){
+
+                    int new_r, new_g, new_b;
+
+                    new_r = target_pixel.r - block_size_ * i;
+                    new_g = target_pixel.g - block_size_ * i;
+                    new_b = target_pixel.b - block_size_ * i;
+
+                    if (new_r >= 0 && new_r < 256 &&
+                        new_g >= 0 && new_g < 256 &&
+                        new_b >= 0 && new_b < 256){
+                        auto& block = get_appropriate_block({
+                            static_cast<ColorChannel>(new_r),
+                            static_cast<ColorChannel>(new_g),
+                            static_cast<ColorChannel>(new_b),
+                        });
+                        
+                        res.insert(res.end(),block.begin(),block.end());
+                    }
+
+                }
+            }    
+        }
+        return res;
+    }
+
+
+    Image get_closest_image(const Pixel& target_pixel) const {
+        std::vector<FileColor> block = get_appropriate_block(target_pixel);
         int block_size = block.size();
 
         if(block_size == 0){ 
-            return Image{target_pixel};
+            // return Image{target_pixel};
+
+            block = get_expanded_block(target_pixel);
+            block_size = block.size();
+            if (block_size == 0){
+                return Image{target_pixel};
+            }
             // printPixel(target_pixel);
             // throw std::runtime_error("No images found in the block."); /* TODO: add some handling here */ 
         }
@@ -440,9 +499,9 @@ class ImageCatalog{
             images_to_check = block_size;
         }
 
-        for(int i = 0; i < max_checks_; i++){
+        for(int i = 0; i < images_to_check; i++){
             // getting image at pseudo-random index
-            int index = std::rand() % block_size;
+            int index = rand_n() % block_size;
             auto& cur_image = block.at(index);
 
             int square_distance = calculate_squared_distance(cur_image.avgColor,target_pixel);
@@ -453,35 +512,38 @@ class ImageCatalog{
         }
 
         assert(most_fitting_image != nullptr);
-        return Image{most_fitting_image->path};
+
+        Image res {most_fitting_image->path};
+        res.set_color_filter({target_pixel,0.5});
+        return res;
     }
 
     private:
-    std::vector<FileColor>& get_block(Pixel avgPixel) {
+    std::vector<FileColor>& get_appropriate_block(Pixel avgPixel) {
         // each channel can have 256 values, so we divide it by block_size_ to get the index of a block
-        int xi = avgPixel.r / block_size_; // 128
+        int xi = avgPixel.r / block_size_; 
         int yi = avgPixel.g / block_size_;
         int zi = avgPixel.b / block_size_;
 
         // multiplying by amout of blocks per axis each coordinate to get value from 1d vector 
         int index = xi * blocks_per_axis_ * blocks_per_axis_ + yi * blocks_per_axis_ + zi;
         if(index >= index_cap_){
-            throw std::runtime_error("std::vector<FileColor>& get_block: index is too big");
+            throw std::runtime_error("std::vector<FileColor>& get_appropriate_block: index is too big");
         }
 
         return color_matrix_[index];
     }
 
-    const std::vector<FileColor>& get_block(Pixel avgPixel) const {
+    const std::vector<FileColor>& get_appropriate_block(Pixel avgPixel) const {
         // each channel can have 256 values, so we divide it by block_size_ to get the index of a block
         int xi = avgPixel.r / block_size_;
         int yi = avgPixel.g / block_size_;
         int zi = avgPixel.b / block_size_;
 
-        // multiplying by amout of blocks per axis each coordinate to get value from 1d vector 
+        // multiplying by amout of blocks per axis each coordinate to get 3d value from 1d vector 
         int index = xi * blocks_per_axis_ * blocks_per_axis_ + yi * blocks_per_axis_ + zi;
-                if(index >= index_cap_){
-            throw std::runtime_error("const std::vector<FileColor>& get_block: index is too big");
+        if(index >= index_cap_){
+            throw std::runtime_error("const std::vector<FileColor>& get_appropriate_block: index is too big");
         }
 
         return color_matrix_[index];
@@ -591,19 +653,20 @@ class ImageGrid{
             int height = canvas.getHeight();
             
             SimilarTiles tiles = gather_similar_tiles();
+
             for(auto& t : tiles){
-                Image img = image_catalog_.getClosestImage(t.first);
+                Image img = image_catalog_.get_closest_image(t.first);
                 img.resize(tile_width_,tile_height_);
                 for(auto& pos : t.second){
-                    img.rotate_90_degrees(std::rand() % 4);
+                    img.rotate_90_degrees(rand_n() % 4);
                     place_tile(pos.first,pos.second,img);
                 }
             }
 
 
-            // img = image_catalog_.getClosestImage(avg);
+            // img = image_catalog_.get_closest_image(avg);
             // img.resize(tile_width_,tile_height_);
-            // img.rotate_90_degrees(std::rand() % 4);
+            // img.rotate_90_degrees(rand_n() % 4);
             // place_tile(x_offset,y_offset,img);
                 
         }
@@ -618,8 +681,6 @@ class ImageGrid{
                 for (int y_offset = 0; y_offset < height; y_offset+=tile_height_){
                     Pixel rounded_avg = roundPixel(getAvgColorOfTile(x_offset,y_offset));
                     result[rounded_avg].push_back(std::pair(x_offset,y_offset));
-                    // std::cout << result.bucket_count() << ' ';
-                    // printPixel(rounded_avg);
                 }
             }
 
@@ -663,26 +724,26 @@ class ImageGrid{
 
 int main(){
 
-    Image img {"/mnt/c/Users/User/projects/cpp/PictureGrid/photo_2025-07-27_18-06-56.jpg"};
+    Image img {"/home/arvlas/Projects/Mosaicify/hitler.png"};
     std::cout << "initialized image" << '\n';
 
     std::cout << "initializing catalog\n";
     ImageCatalog catalog(32);
 
     std::cout<< "loading cache\n";
-    catalog.load_cache("/mnt/c/Users/User/projects/cpp/PictureGrid/cache");
+    catalog.load_cache("/home/arvlas/Projects/Mosaicify/cache");
 
     // std::cout << "scanning dir" << '\n';
-    // catalog.ScanDir("/mnt/c/Users/User/projects/cpp/PictureGrid/images");
+    // catalog.ScanDir("/home/arvlas/Projects/Mosaicify/images/");
 
     // std::cout<< "saving cache\n";
-    // catalog.save_cache("/mnt/c/Users/User/projects/cpp/PictureGrid/cache");
+    // catalog.save_cache("/home/arvlas/Projects/Mosaicify/cache");
 
     std::cout << "initializing imGrid\n";
-    ImageGrid imGrid(256,256,32,32,catalog);
+    ImageGrid imGrid(256,256,64,64,catalog);
 
     std::cout << "resizing image" << '\n';
-    img.resize(img.getWidth()*8,img.getHeight()*8); 
+    img.resize(img.getWidth()*10,img.getHeight()*10);
     
     std::cout << "setting target image" << '\n';
     imGrid.set_target_image(img);
@@ -691,7 +752,7 @@ int main(){
     imGrid.apply_mosaic();
 
     std::cout << "saving" << '\n';
-    imGrid.save("/mnt/c/Users/User/projects/cpp/PictureGrid/OUT.png");
+    imGrid.save("/home/arvlas/Projects/Mosaicify/OUT.png");
 
     return 0;
 }
